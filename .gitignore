@@ -205,3 +205,41 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+context/
+.claude/
+
+# Next.js
+/.next/
+/out/
+next-env.d.ts
+
+# Node.js dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# Production
+/build
+
+# Misc
+.DS_Store
+*.pem
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env files
+.env*.local
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+
+.env.example
+.mcp.json
+CLAUDE.md
