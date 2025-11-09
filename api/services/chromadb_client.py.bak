@@ -1,0 +1,271 @@
+import chromadb
+from chromadb.config import Settings
+from google import genai
+from config import settings as app_settings
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+class GeminiEmbeddingFunction:
+    """
+    Custom embedding function using Google Gemini API.
+    Uses gemini-embedding-001 model with 768 dimensions for storage efficiency.
+    """
+
+    def __init__(self, api_key: str):
+        self.client = genai.Client(api_key=api_key)
+        self.model = "gemini-embedding-001"
+
+    def name(self) -> str:
+        """Return the name of the embedding function (required by ChromaDB)"""
+        return "gemini-embedding-001"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        """
+        Generate embeddings for a batch of texts.
+
+        Args:
+            input: List of strings to embed (required parameter name for ChromaDB compatibility)
+
+        Returns:
+            List of embedding vectors
+        """
+        try:
+            # Use RETRIEVAL_DOCUMENT task type for journal entries
+            result = self.client.models.embed_content(
+                model=self.model,
+                contents=input,
+                config={
+                    "task_type": "RETRIEVAL_DOCUMENT",
+                    "output_dimensionality": 768  # Balance between performance and storage
+                }
+            )
+
+            embeddings = [emb.values for emb in result.embeddings]
+            logger.info(f"Generated {len(embeddings)} embeddings")
+            return embeddings
+
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {e}")
+            raise
+
+
+class GeminiQueryEmbeddingFunction:
+    """
+    Embedding function for queries (used when searching).
+    Uses RETRIEVAL_QUERY task type for optimal search performance.
+    """
+
+    def __init__(self, api_key: str):
+        self.client = genai.Client(api_key=api_key)
+        self.model = "gemini-embedding-001"
+
+    def __call__(self, query: str) -> list[float]:
+        """
+        Generate embedding for a search query.
+
+        Args:
+            query: Search query string
+
+        Returns:
+            Embedding vector
+        """
+        try:
+            result = self.client.models.embed_content(
+                model=self.model,
+                contents=[query],
+                config={
+                    "task_type": "RETRIEVAL_QUERY",
+                    "output_dimensionality": 768
+                }
+            )
+
+            return result.embeddings[0].values
+
+        except Exception as e:
+            logger.error(f"Error generating query embedding: {e}")
+            raise
+
+
+# Initialize ChromaDB client
+try:
+    # Persistent client for production
+    chroma_client = chromadb.PersistentClient(
+        path="./chroma_data",
+        settings=Settings(
+            anonymized_telemetry=False,
+            allow_reset=True
+        )
+    )
+    logger.info("ChromaDB client initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize ChromaDB: {e}")
+    raise
+
+
+# Initialize embedding function
+embedding_function = GeminiEmbeddingFunction(api_key=app_settings.GOOGLE_API_KEY)
+
+
+# Get or create journal entries collection
+try:
+    journal_collection = chroma_client.get_or_create_collection(
+        name="journal_entries",
+        embedding_function=embedding_function,
+        metadata={
+            "description": "User journal entries with Gemini embeddings",
+            "dimension": 768,
+            "model": "gemini-embedding-001"
+        }
+    )
+    logger.info("Journal collection ready")
+except Exception as e:
+    logger.error(f"Failed to create journal collection: {e}")
+    raise
+
+
+def add_journal_entry(
+    entry_id: str,
+    user_id: str,
+    content: str,
+    date: str,
+    additional_metadata: Optional[dict] = None
+) -> None:
+    """
+    Add a journal entry to ChromaDB.
+
+    Args:
+        entry_id: Unique identifier for the entry
+        user_id: User's ID (for filtering)
+        content: Journal entry text
+        date: Entry date in ISO format
+        additional_metadata: Optional extra metadata
+
+    Raises:
+        Exception: If insertion fails
+    """
+    try:
+        metadata = {
+            "user_id": user_id,
+            "date": date,
+            "entry_id": entry_id
+        }
+
+        if additional_metadata:
+            metadata.update(additional_metadata)
+
+        journal_collection.add(
+            documents=[content],
+            metadatas=[metadata],
+            ids=[f"entry_{entry_id}"]
+        )
+
+        logger.info(f"Added journal entry {entry_id} to ChromaDB")
+
+    except Exception as e:
+        logger.error(f"Failed to add journal entry to ChromaDB: {e}")
+        raise
+
+
+def search_journal_entries(
+    user_id: str,
+    query: str,
+    n_results: int = 5
+) -> dict:
+    """
+    Search journal entries for a specific user using semantic similarity.
+
+    Args:
+        user_id: User's ID to filter entries
+        query: Search query
+        n_results: Number of results to return
+
+    Returns:
+        Dictionary with search results
+    """
+    try:
+        # Generate query embedding
+        query_embedding_fn = GeminiQueryEmbeddingFunction(api_key=app_settings.GOOGLE_API_KEY)
+        query_embedding = query_embedding_fn(query)
+
+        # Search with user_id filter
+        results = journal_collection.query(
+            query_embeddings=[query_embedding],
+            n_results=n_results,
+            where={"user_id": user_id}  # Filter by user
+        )
+
+        # Format results
+        formatted_results = {
+            "query": query,
+            "results": []
+        }
+
+        if results["documents"] and len(results["documents"][0]) > 0:
+            for i in range(len(results["documents"][0])):
+                formatted_results["results"].append({
+                    "content": results["documents"][0][i],
+                    "metadata": results["metadatas"][0][i],
+                    "distance": results["distances"][0][i],
+                    "similarity": 1 - results["distances"][0][i]  # Convert distance to similarity
+                })
+
+        logger.info(f"Found {len(formatted_results['results'])} journal entries for query")
+        return formatted_results
+
+    except Exception as e:
+        logger.error(f"Failed to search journal entries: {e}")
+        raise
+
+
+def delete_journal_entry(entry_id: str) -> None:
+    """
+    Delete a journal entry from ChromaDB.
+
+    Args:
+        entry_id: ID of the entry to delete
+
+    Raises:
+        Exception: If deletion fails
+    """
+    try:
+        journal_collection.delete(ids=[f"entry_{entry_id}"])
+        logger.info(f"Deleted journal entry {entry_id} from ChromaDB")
+
+    except Exception as e:
+        logger.error(f"Failed to delete journal entry: {e}")
+        raise
+
+
+def update_journal_entry(
+    entry_id: str,
+    user_id: str,
+    new_content: str,
+    date: str
+) -> None:
+    """
+    Update a journal entry (delete old, add new with same ID).
+
+    Args:
+        entry_id: Entry ID
+        user_id: User ID
+        new_content: Updated content
+        date: Entry date
+
+    Raises:
+        Exception: If update fails
+    """
+    try:
+        # Delete old entry
+        delete_journal_entry(entry_id)
+
+        # Add updated entry
+        add_journal_entry(entry_id, user_id, new_content, date)
+
+        logger.info(f"Updated journal entry {entry_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to update journal entry: {e}")
+        raise

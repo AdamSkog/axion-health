@@ -10,7 +10,8 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fadeInUp, staggerItem } from "@/lib/animations";
-import { Send, ExternalLink, TrendingUp, Brain } from "lucide-react";
+import { queryAIAgent } from "@/lib/api";
+import { Send, ExternalLink, TrendingUp, Brain, AlertCircle } from "lucide-react";
 import {
   LineChart,
   Line,
@@ -24,50 +25,36 @@ import {
 interface QueryResponse {
   id: string;
   query: string;
-  type: "text" | "chart" | "research";
-  content: string;
+  answer: string;
+  tools_used: string[];
   chartData?: any[];
-  sources?: Array<{ title: string; url: string }>;
+  sources?: string[];
+  error?: string;
 }
 
-// Mock forecast data
-const mockForecastData = [
-  { day: "Mon", actual: 68, forecast: null },
-  { day: "Tue", actual: 72, forecast: null },
-  { day: "Wed", actual: 70, forecast: null },
-  { day: "Thu", actual: 75, forecast: null },
-  { day: "Fri", actual: 73, forecast: null },
-  { day: "Sat", actual: null, forecast: 71 },
-  { day: "Sun", actual: null, forecast: 69 },
-  { day: "Mon", actual: null, forecast: 70 },
-];
+// Helper to extract chart data from tool results
+function extractChartData(toolResults: Record<string, any>): any[] | null {
+  // Check for forecasting results
+  if (toolResults.run_forecasting) {
+    const forecast = toolResults.run_forecasting;
+    if (forecast.forecast_dates && forecast.forecast_values) {
+      return forecast.forecast_dates.map((date: string, idx: number) => ({
+        date: new Date(date).toLocaleDateString(),
+        forecast: forecast.forecast_values[idx],
+        low: forecast.confidence_intervals?.[idx]?.low,
+        high: forecast.confidence_intervals?.[idx]?.high,
+      }));
+    }
+  }
 
-const mockResponses: Record<string, QueryResponse> = {
-  "tired": {
-    id: "1",
-    query: "Why was I so tired last Tuesday?",
-    type: "text",
-    content: "Based on your data, you were likely tired last Tuesday due to a combination of factors: Your journal entry mentions a 'stressful project deadline,' and your sleep data shows you only slept 4.5 hours that night. Additionally, your heart rate variability was 15% lower than your baseline, indicating elevated stress levels.",
-  },
-  "forecast": {
-    id: "2",
-    query: "Forecast my resting heart rate for the next week",
-    type: "chart",
-    content: "Based on ARIMA time-series analysis of your last 30 days of data, here's your predicted resting heart rate for the next 7 days. The model shows a slight downward trend, suggesting improved cardiovascular health.",
-    chartData: mockForecastData,
-  },
-  "medication": {
-    id: "3",
-    query: "My heart rate is high, and I just started a new allergy medication. Is there a link?",
-    type: "research",
-    content: "Yes, there appears to be a link. Your data shows your resting heart rate became elevated by 8-10 bpm starting the same day you logged 'Started Zyrtec' in your journal. External research confirms that an increased heart rate (tachycardia) is a known, though uncommon, side effect of cetirizine (Zyrtec). This occurs in approximately 2-5% of users and is usually mild.",
-    sources: [
-      { title: "FDA - Cetirizine Side Effects", url: "https://www.fda.gov" },
-      { title: "WebMD - Zyrtec Oral: Uses, Side Effects", url: "https://www.webmd.com" },
-      { title: "Mayo Clinic - Antihistamines and Heart Rate", url: "https://www.mayoclinic.org" },
-    ],
-  },
-};
+  // Check for correlation results (could visualize as a network)
+  if (toolResults.find_correlations && toolResults.find_correlations.correlations?.length > 0) {
+    // Return correlation data for potential visualization
+    return toolResults.find_correlations.correlations;
+  }
+
+  return null;
+}
 
 export default function DeepDivePage() {
   const [query, setQuery] = useState("");
@@ -78,31 +65,44 @@ export default function DeepDivePage() {
     e.preventDefault();
     if (!query.trim()) return;
 
+    const currentQuery = query.trim();
+    setQuery(""); // Clear input immediately
     setLoading(true);
 
-    // Simulate API call and intelligent response
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    try {
+      // Call the real AI agent
+      const result = await queryAIAgent(currentQuery);
 
-    // Simple keyword matching for demo
-    let response: QueryResponse;
-    if (query.toLowerCase().includes("tired") || query.toLowerCase().includes("fatigue")) {
-      response = mockResponses["tired"];
-    } else if (query.toLowerCase().includes("forecast") || query.toLowerCase().includes("predict")) {
-      response = mockResponses["forecast"];
-    } else if (query.toLowerCase().includes("medication") || query.toLowerCase().includes("heart rate")) {
-      response = mockResponses["medication"];
-    } else {
-      response = {
+      // Extract chart data if available
+      const chartData = result.tool_results ? extractChartData(result.tool_results) : null;
+
+      const newResponse: QueryResponse = {
         id: Date.now().toString(),
-        query: query,
-        type: "text",
-        content: "I've analyzed your health data and found some interesting patterns. This is a demo response. In production, the AI agent would call various tools (anomaly detection, correlation analysis, journal search, and external research) to provide a comprehensive answer.",
+        query: currentQuery,
+        answer: result.answer,
+        tools_used: result.tools_used,
+        chartData: chartData || undefined,
+        sources: result.sources.length > 0 ? result.sources : undefined,
+        error: result.error,
       };
-    }
 
-    setResponses([{ ...response, query }, ...responses]);
-    setQuery("");
-    setLoading(false);
+      setResponses([newResponse, ...responses]);
+    } catch (err) {
+      console.error("Error querying agent:", err);
+
+      // Add error response
+      const errorResponse: QueryResponse = {
+        id: Date.now().toString(),
+        query: currentQuery,
+        answer: err instanceof Error ? err.message : "Failed to process query. Please try again.",
+        tools_used: [],
+        error: err instanceof Error ? err.message : "Unknown error",
+      };
+
+      setResponses([errorResponse, ...responses]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -202,14 +202,33 @@ export default function DeepDivePage() {
                       {/* Query */}
                       <div className="mb-4 pb-4 border-b border-slate-200">
                         <p className="text-lg font-semibold text-slate-900">{response.query}</p>
+                        {response.tools_used && response.tools_used.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mt-2">
+                            {response.tools_used.map((tool, idx) => (
+                              <Badge key={idx} variant="outline" className="text-xs">
+                                {tool.replace(/_/g, " ")}
+                              </Badge>
+                            ))}
+                          </div>
+                        )}
                       </div>
+
+                      {/* Error State */}
+                      {response.error && (
+                        <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                          <div className="flex items-center gap-2 text-red-700">
+                            <AlertCircle className="w-5 h-5" />
+                            <p className="font-semibold">Error processing query</p>
+                          </div>
+                        </div>
+                      )}
 
                       {/* Answer Content */}
                       <div className="prose prose-slate max-w-none">
-                        <p className="text-slate-700 leading-relaxed mb-4">{response.content}</p>
+                        <p className="text-slate-700 leading-relaxed mb-4 whitespace-pre-wrap">{response.answer}</p>
 
-                        {/* Chart (if type is chart) */}
-                        {response.type === "chart" && response.chartData && (
+                        {/* Chart (if chart data exists) */}
+                        {response.chartData && (
                           <div className="my-6 p-4 bg-slate-50 rounded-lg">
                             <div className="flex items-center gap-2 mb-4">
                               <TrendingUp className="w-5 h-5 text-teal-600" />
@@ -218,7 +237,7 @@ export default function DeepDivePage() {
                             <ResponsiveContainer width="100%" height={250}>
                               <LineChart data={response.chartData}>
                                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                                <XAxis dataKey="day" stroke="#64748b" />
+                                <XAxis dataKey="date" stroke="#64748b" />
                                 <YAxis stroke="#64748b" />
                                 <Tooltip
                                   contentStyle={{
@@ -229,41 +248,54 @@ export default function DeepDivePage() {
                                 />
                                 <Line
                                   type="monotone"
-                                  dataKey="actual"
-                                  stroke="#0d9488"
-                                  strokeWidth={3}
-                                  name="Actual"
-                                  dot={{ fill: "#0d9488", r: 4 }}
-                                />
-                                <Line
-                                  type="monotone"
                                   dataKey="forecast"
                                   stroke="#3b82f6"
                                   strokeWidth={3}
-                                  strokeDasharray="5 5"
                                   name="Forecast"
                                   dot={{ fill: "#3b82f6", r: 4 }}
                                 />
+                                {response.chartData[0]?.low && (
+                                  <>
+                                    <Line
+                                      type="monotone"
+                                      dataKey="low"
+                                      stroke="#94a3b8"
+                                      strokeWidth={1}
+                                      strokeDasharray="3 3"
+                                      name="Lower Bound"
+                                      dot={false}
+                                    />
+                                    <Line
+                                      type="monotone"
+                                      dataKey="high"
+                                      stroke="#94a3b8"
+                                      strokeWidth={1}
+                                      strokeDasharray="3 3"
+                                      name="Upper Bound"
+                                      dot={false}
+                                    />
+                                  </>
+                                )}
                               </LineChart>
                             </ResponsiveContainer>
                           </div>
                         )}
 
-                        {/* Sources (if type is research) */}
-                        {response.type === "research" && response.sources && (
+                        {/* Sources (if research sources exist) */}
+                        {response.sources && response.sources.length > 0 && (
                           <div className="mt-6 pt-4 border-t border-slate-200">
                             <p className="text-sm font-semibold text-slate-700 mb-3">Sources:</p>
                             <div className="flex flex-wrap gap-2">
                               {response.sources.map((source, idx) => (
                                 <a
                                   key={idx}
-                                  href={source.url}
+                                  href={source}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="inline-flex items-center gap-1 text-xs"
                                 >
                                   <Badge variant="secondary" className="hover:bg-slate-200 cursor-pointer">
-                                    {source.title}
+                                    Source {idx + 1}
                                     <ExternalLink className="w-3 h-3 ml-1" />
                                   </Badge>
                                 </a>
