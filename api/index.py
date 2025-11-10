@@ -191,6 +191,45 @@ def generate_mock_biomarkers(days: int) -> list[dict]:
              "startDateTime": timestamp, "endDateTime": timestamp, "source": "mock"},
         ])
 
+        # Add aggregated metrics computed from variants
+        # Heart rate: average of resting and sleep
+        hr_resting = next((b["value"] for b in biomarkers if b["type"] == "heart_rate_resting" and b["startDateTime"] == timestamp), 60)
+        hr_sleep = next((b["value"] for b in biomarkers if b["type"] == "heart_rate_sleep" and b["startDateTime"] == timestamp), 55)
+        avg_heart_rate = (hr_resting + hr_sleep) / 2
+        biomarkers.append({
+            "type": "heart_rate",
+            "value": round(avg_heart_rate),
+            "unit": "bpm",
+            "startDateTime": timestamp,
+            "endDateTime": timestamp,
+            "source": "mock"
+        })
+
+        # Blood pressure: formatted as "systolic/diastolic"
+        bp_systolic = next((b["value"] for b in biomarkers if b["type"] == "blood_pressure_systolic" and b["startDateTime"] == timestamp), 120)
+        bp_diastolic = next((b["value"] for b in biomarkers if b["type"] == "blood_pressure_diastolic" and b["startDateTime"] == timestamp), 80)
+        biomarkers.append({
+            "type": "blood_pressure",
+            "value": f"{int(bp_systolic)}/{int(bp_diastolic)}",
+            "unit": "mmHg",
+            "startDateTime": timestamp,
+            "endDateTime": timestamp,
+            "source": "mock"
+        })
+
+        # HRV: average of SDNN and RMSSD normalized to 0-100 scale
+        hrv_sdnn = next((b["value"] for b in biomarkers if b["type"] == "heart_rate_variability_sdnn" and b["startDateTime"] == timestamp), 40)
+        hrv_rmssd = next((b["value"] for b in biomarkers if b["type"] == "heart_rate_variability_rmssd" and b["startDateTime"] == timestamp), 40)
+        avg_hrv = ((hrv_sdnn / 60) + (hrv_rmssd / 100)) / 2 * 100  # Normalize to 0-100
+        biomarkers.append({
+            "type": "hrv",
+            "value": round(avg_hrv, 1),
+            "unit": "score",
+            "startDateTime": timestamp,
+            "endDateTime": timestamp,
+            "source": "mock"
+        })
+
     logger.info(f"Generated {len(biomarkers)} mock biomarker data points for {days} days")
     return biomarkers
 
@@ -222,7 +261,7 @@ async def root():
 @app.get("/api/health-data")
 async def get_health_data(
     token: TokenDep,
-    days: int = Query(default=7, ge=1, le=90, description="Number of days to fetch")
+    days: int = Query(default=30, ge=1, le=90, description="Number of days to fetch")
 ):
     """
     Fetch user's health data from Sahha Sandbox API.
@@ -248,7 +287,11 @@ async def get_health_data(
         user_response = user_client.auth.get_user(token)
         user_id = user_response.user.id
 
-        logger.info(f"Fetching health data for user {user_id}")
+        # Use sample profile for development if configured, otherwise use real user_id
+        external_id = settings.SAHHA_SAMPLE_PROFILE_ID or str(user_id)
+        is_sample_profile = bool(settings.SAHHA_SAMPLE_PROFILE_ID)
+
+        logger.info(f"Fetching health data for user {user_id} (external_id: {external_id})")
 
         # Calculate date range
         end_date = datetime.utcnow()
@@ -256,75 +299,180 @@ async def get_health_data(
 
         biomarkers = None
         data_source = "sahha"
-
-        # Try to fetch from Sahha
+        
+        # SMART CACHING: Try to load from Supabase first (much faster)
         try:
-            # Ensure user has a Sahha profile
+            logger.info(f"Checking Supabase cache for user {user_id}")
+            cached_result = user_client.table("health_metrics").select("*").eq(
+                "user_id", str(user_id)
+            ).gte(
+                "timestamp", start_date.isoformat()
+            ).lte(
+                "timestamp", end_date.isoformat()
+            ).order("timestamp", desc=False).execute()
+            
+            if cached_result.data and len(cached_result.data) > 100:  # At least 100 records = meaningful data
+                # Check if data is recent (most recent timestamp < 1 hour old)
+                most_recent = max([row["timestamp"] for row in cached_result.data])
+                most_recent_time = datetime.fromisoformat(most_recent.replace('Z', '+00:00'))
+                age_hours = (datetime.utcnow().replace(tzinfo=most_recent_time.tzinfo) - most_recent_time).total_seconds() / 3600
+                
+                if age_hours < 1:  # Data is fresh (< 1 hour old)
+                    logger.info(f"Using cached data from Supabase ({len(cached_result.data)} records, {age_hours:.1f}h old)")
+                    # Convert to biomarker format
+                    biomarkers = []
+                    for row in cached_result.data:
+                        biomarkers.append({
+                            "type": row["metric_type"],
+                            "value": row["value"],
+                            "unit": row["unit"],
+                            "startDateTime": row["timestamp"],
+                            "endDateTime": row["timestamp"],
+                            "source": row.get("source", "cached")
+                        })
+                    data_source = "cached"
+                    # Skip Sahha fetch entirely - return cached data
+                else:
+                    logger.info(f"Cached data exists but is stale ({age_hours:.1f}h old), fetching fresh data")
+            else:
+                logger.info(f"Insufficient cached data ({len(cached_result.data) if cached_result.data else 0} records), fetching from Sahha")
+        except Exception as cache_error:
+            logger.info(f"Cache check failed or table doesn't exist: {cache_error}. Fetching from Sahha.")
+        
+        # Only fetch from Sahha if we don't have cached data
+        if not biomarkers:
+            # Try to fetch from Sahha
             try:
-                sahha_client.create_profile(str(user_id))
-            except Exception as e:
-                logger.warning(f"Error creating Sahha profile (may already exist): {e}")
+                # Only create profile for real users, not for sample profiles (they already exist)
+                if not is_sample_profile:
+                    try:
+                        sahha_client.create_profile(str(user_id))
+                    except Exception as e:
+                        logger.warning(f"Error creating Sahha profile (may already exist): {e}")
 
-            # Define all biomarker types we want to fetch (matching user's working example)
-            biomarker_types = [
-                # Activity metrics
-                "steps", "floors_climbed", "active_hours", "active_duration",
-                "activity_low_intensity_duration", "activity_medium_intensity_duration",
-                "activity_high_intensity_duration", "activity_sedentary_duration",
-                "active_energy_burned", "total_energy_burned",
-                # Body metrics
-                "height", "weight", "body_mass_index", "body_fat", "fat_mass", "lean_mass",
-                "waist_circumference", "resting_energy_burned",
-                # Characteristic metrics
-                "age", "biological_sex", "date_of_birth",
-                # Sleep metrics
-                "sleep_start_time", "sleep_end_time", "sleep_duration", "sleep_debt",
-                "sleep_interruptions", "sleep_in_bed_duration", "sleep_awake_duration",
-                "sleep_light_duration", "sleep_rem_duration", "sleep_deep_duration",
-                "sleep_regularity", "sleep_latency", "sleep_efficiency",
-                # Vital metrics
-                "heart_rate_resting", "heart_rate_sleep",
-                "heart_rate_variability_sdnn", "heart_rate_variability_rmssd",
-                "respiratory_rate", "respiratory_rate_sleep",
-                "oxygen_saturation", "oxygen_saturation_sleep", "vo2_max",
-                "blood_glucose", "blood_pressure_systolic", "blood_pressure_diastolic",
-                "body_temperature_basal", "skin_temperature_sleep"
-            ]
+                # Define all biomarker types we want to fetch (matching user's working example)
+                biomarker_types = [
+                    # Activity metrics
+                    "steps", "floors_climbed", "active_hours", "active_duration",
+                    "activity_low_intensity_duration", "activity_medium_intensity_duration",
+                    "activity_high_intensity_duration", "activity_sedentary_duration",
+                    "active_energy_burned", "total_energy_burned",
+                    # Body metrics
+                    "height", "weight", "body_mass_index", "body_fat", "fat_mass", "lean_mass",
+                    "waist_circumference", "resting_energy_burned",
+                    # Characteristic metrics
+                    "age", "biological_sex", "date_of_birth",
+                    # Sleep metrics
+                    "sleep_start_time", "sleep_end_time", "sleep_duration", "sleep_debt",
+                    "sleep_interruptions", "sleep_in_bed_duration", "sleep_awake_duration",
+                    "sleep_light_duration", "sleep_rem_duration", "sleep_deep_duration",
+                    "sleep_regularity", "sleep_latency", "sleep_efficiency",
+                    # Vital metrics
+                    "heart_rate_resting", "heart_rate_sleep",
+                    "heart_rate_variability_sdnn", "heart_rate_variability_rmssd",
+                    "respiratory_rate", "respiratory_rate_sleep",
+                    "oxygen_saturation", "oxygen_saturation_sleep", "vo2_max",
+                    "blood_glucose", "blood_pressure_systolic", "blood_pressure_diastolic",
+                    "body_temperature_basal", "skin_temperature_sleep"
+                ]
 
-            # Fetch biomarkers from Sahha with all categories and types
-            biomarkers = sahha_client.get_biomarkers(
-                external_id=str(user_id),
-                start_date=start_date.isoformat(),
-                end_date=end_date.isoformat(),
-                categories=["activity", "body", "characteristic", "sleep", "vitals"],
-                types=biomarker_types
-            )
+                # Fetch biomarkers from Sahha with all categories and types
+                biomarkers = sahha_client.get_biomarkers(
+                    external_id=external_id,
+                    start_date=start_date.isoformat(),
+                    end_date=end_date.isoformat(),
+                    categories=["activity", "body", "characteristic", "sleep", "vitals"],
+                    types=biomarker_types
+                )
 
-            logger.info(f"Successfully fetched {len(biomarkers)} biomarkers from Sahha API")
+                logger.info(f"Successfully fetched {len(biomarkers)} biomarkers from Sahha API")
 
-            # If Sahha returns empty but no error, it's valid (profile has no data yet)
-            # Fall back to mock data to give users something to see
-            if not biomarkers:
-                logger.info("Sahha returned no biomarker data. Using mock data for demo.")
+                # If Sahha returns empty but no error, it's valid (profile has no data yet)
+                # Fall back to mock data to give users something to see
+                if not biomarkers:
+                    logger.info("Sahha returned no biomarker data. Using mock data for demo.")
+                    biomarkers = generate_mock_biomarkers(days)
+                    data_source = "mock"
+
+            except Exception as sahha_error:
+                logger.warning(f"Failed to fetch from Sahha API: {type(sahha_error).__name__}: {sahha_error}. Using mock data as fallback.")
+                # Fall back to mock data for development/testing
                 biomarkers = generate_mock_biomarkers(days)
                 data_source = "mock"
 
-        except Exception as sahha_error:
-            logger.warning(f"Failed to fetch from Sahha API: {type(sahha_error).__name__}: {sahha_error}. Using mock data as fallback.")
-            # Fall back to mock data for development/testing
-            biomarkers = generate_mock_biomarkers(days)
-            data_source = "mock"
-
-        # Optional: Store in Supabase for caching (uncomment if needed)
-        # for biomarker in biomarkers:
-        #     user_client.table("health_metrics").insert({
-        #         "user_id": str(user_id),
-        #         "timestamp": biomarker.get("startDateTime"),
-        #         "metric_type": biomarker.get("type"),
-        #         "value": biomarker.get("value"),
-        #         "unit": biomarker.get("unit"),
-        #         "source": data_source
-        #     }).execute()
+        # Store in Supabase for tool access (anomaly detection, forecasting, correlations)
+        # Use BATCH INSERT instead of individual inserts for speed (1 request vs 900 requests)
+        stored_count = 0
+        
+        try:
+            # Step 1: Prepare all records for batch insert
+            records_to_insert = []
+            for biomarker in biomarkers:
+                value = biomarker.get("value")
+                if value is not None:
+                    value = str(value)
+                
+                records_to_insert.append({
+                    "user_id": str(user_id),
+                    "timestamp": biomarker.get("startDateTime"),
+                    "metric_type": biomarker.get("type"),
+                    "value": value,
+                    "unit": biomarker.get("unit"),
+                    "source": data_source
+                })
+            
+            # Step 2: Check which records already exist (to avoid duplicates)
+            try:
+                existing_result = user_client.table("health_metrics").select(
+                    "timestamp,metric_type"
+                ).eq(
+                    "user_id", str(user_id)
+                ).gte(
+                    "timestamp", start_date.isoformat()
+                ).lte(
+                    "timestamp", end_date.isoformat()
+                ).execute()
+                
+                # Build set of existing (timestamp, metric_type) pairs
+                existing_keys = {
+                    (row["timestamp"], row["metric_type"]) 
+                    for row in (existing_result.data or [])
+                }
+                
+                # Filter out duplicates
+                new_records = [
+                    r for r in records_to_insert 
+                    if (r["timestamp"], r["metric_type"]) not in existing_keys
+                ]
+                
+                logger.info(f"Found {len(existing_keys)} existing records, {len(new_records)} new records to insert")
+                
+            except Exception as check_error:
+                # If check fails (table doesn't exist), try to insert all
+                error_msg = str(check_error).lower()
+                if ("relation" in error_msg and "does not exist" in error_msg) or ("table" in error_msg and "not found" in error_msg):
+                    logger.warning(f"health_metrics table does not exist. Run api/schema/health_metrics.sql in Supabase. Skipping data persistence.")
+                    new_records = []
+                else:
+                    logger.warning(f"Failed to check existing records: {check_error}. Attempting insert anyway.")
+                    new_records = records_to_insert
+            
+            # Step 3: Batch insert only new records (if any)
+            if new_records:
+                try:
+                    result = user_client.table("health_metrics").insert(new_records).execute()
+                    stored_count = len(result.data) if result.data else 0
+                    logger.info(f"Batch inserted {stored_count} new biomarkers to Supabase for user {user_id}")
+                except Exception as batch_error:
+                    # If batch insert fails, log but don't crash
+                    logger.warning(f"Batch insert failed: {batch_error}")
+                    stored_count = 0
+            else:
+                logger.info(f"No new biomarkers to insert (all {len(records_to_insert)} already exist)")
+                
+        except Exception as e:
+            logger.error(f"Error during batch insert process: {e}")
+            stored_count = 0
 
         return {
             "success": True,
@@ -350,7 +498,7 @@ async def get_health_data(
 @app.get("/api/health-scores")
 async def get_health_scores_endpoint(
     token: TokenDep,
-    days: int = Query(default=7, ge=1, le=90, description="Number of days to fetch")
+    days: int = Query(default=30, ge=1, le=90, description="Number of days to fetch")
 ):
     """
     Fetch user's health scores from Sahha (Wellbeing, Activity, Sleep, Readiness).
@@ -545,14 +693,16 @@ async def create_journal_entry(
 
         # Add to Pinecone for RAG
         try:
+            logger.info(f"[JOURNAL_EMBED] Adding entry {entry_id} to Pinecone for semantic search")
             add_journal_entry(
                 entry_id=entry_id,
                 user_id=user_id,
                 content=entry.content,
                 date=entry.date.isoformat()
             )
+            logger.info(f"[JOURNAL_EMBED] Successfully added entry {entry_id} to Pinecone")
         except Exception as e:
-            logger.error(f"Failed to add entry to Pinecone: {e}")
+            logger.error(f"[JOURNAL_EMBED] Failed to add entry to Pinecone: {type(e).__name__}: {e}", exc_info=True)
             # Don't fail the request - entry is in Supabase
             # TODO: Add to retry queue
 
@@ -832,8 +982,12 @@ async def query_ai_agent(token: TokenDep, query_data: AgentQuery = Body(...)):
 
         logger.info(f"Processing query for user {user_id}: '{query_data.query}'")
 
-        # Call Gemini orchestrator with function calling
-        result = process_query(user_id=user_id, query=query_data.query)
+        # Call Gemini orchestrator with session-based history (no database dependency)
+        result = process_query(
+            user_id=user_id, 
+            query=query_data.query, 
+            session_history=query_data.history
+        )
 
         return {
             "success": True,
@@ -847,6 +1001,50 @@ async def query_ai_agent(token: TokenDep, query_data: AgentQuery = Body(...)):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to process query: {str(e)}"
+        )
+
+
+@app.delete("/api/agent/history")
+async def clear_chat_history(token: TokenDep):
+    """
+    Clear all chat history for the authenticated user.
+    
+    This endpoint allows users to delete their conversation history,
+    effectively starting fresh with the AI assistant.
+    
+    Args:
+        token: JWT token from Authorization header (injected)
+    
+    Returns:
+        Success status
+    """
+    try:
+        from services.chat_history import clear_user_history
+        
+        user_client = get_user_scoped_client(token)
+        user_response = user_client.auth.get_user(token)
+        user_id = str(user_response.user.id)
+        
+        success = clear_user_history(user_id=user_id, access_token=token)
+        
+        if success:
+            return {
+                "success": True,
+                "message": "Chat history cleared successfully"
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to clear chat history"
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error clearing chat history: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear chat history: {str(e)}"
         )
 
 

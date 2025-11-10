@@ -10,9 +10,15 @@ from tools.correlation_analysis import find_correlations
 from tools.forecasting import run_forecasting
 from tools.journal_search import search_private_journal
 from tools.external_research import external_research
+from services.chat_history import (
+    save_message,
+    load_recent_history,
+    convert_to_gemini_history
+)
 import logging
 import json
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +36,7 @@ TOOL_SCHEMAS = [
             properties={
                 "metric_name": protos.Schema(
                     type=protos.Type.STRING,
-                    description="Name of the health metric to analyze (e.g., 'heart_rate', 'steps', 'sleep_duration', 'blood_pressure')"
+                    description="Name of the health metric to analyze. Common metrics: 'heart_rate_resting', 'heart_rate_sleep', 'steps', 'sleep_duration', 'blood_pressure_systolic', 'blood_pressure_diastolic', 'oxygen_saturation', 'body_fat'. You can also use user-friendly names like 'heart rate' which will be normalized automatically."
                 ),
                 "lookback_days": protos.Schema(
                     type=protos.Type.INTEGER,
@@ -69,7 +75,7 @@ TOOL_SCHEMAS = [
             properties={
                 "metric_name": protos.Schema(
                     type=protos.Type.STRING,
-                    description="Name of the health metric to forecast (e.g., 'heart_rate', 'steps', 'sleep_duration')"
+                    description="Name of the health metric to forecast. Common metrics: 'heart_rate_resting' (for resting heart rate), 'heart_rate_sleep', 'steps', 'sleep_duration', 'weight', 'body_mass_index'. You can also use user-friendly names like 'heart rate' or 'resting heart rate' which will be normalized automatically."
                 ),
                 "forecast_days": protos.Schema(
                     type=protos.Type.INTEGER,
@@ -131,30 +137,44 @@ def _execute_function(function_name: str, user_id: str, arguments: dict) -> dict
         Dictionary with function execution results
     """
     try:
-        logger.info(f"Executing function: {function_name} with args: {arguments}")
+        logger.info(f"[TOOL_EXECUTE] Function: {function_name}, User: {user_id}, Args: {arguments}")
 
         if function_name == "detect_anomalies":
-            return detect_anomalies(user_id=user_id, **arguments)
+            result = detect_anomalies(user_id=user_id, **arguments)
+            logger.info(f"[TOOL_RESULT] detect_anomalies: Found {result.get('anomaly_count', 0)} anomalies")
+            return result
 
         elif function_name == "find_correlations":
-            return find_correlations(user_id=user_id, **arguments)
+            result = find_correlations(user_id=user_id, **arguments)
+            logger.info(f"[TOOL_RESULT] find_correlations: Found {len(result.get('correlations', []))} correlations")
+            return result
 
         elif function_name == "run_forecasting":
-            return run_forecasting(user_id=user_id, **arguments)
+            result = run_forecasting(user_id=user_id, **arguments)
+            if "error" in result:
+                logger.warning(f"[TOOL_RESULT] run_forecasting: Error - {result.get('error')}")
+            else:
+                logger.info(f"[TOOL_RESULT] run_forecasting: Generated {len(result.get('forecast_values', []))} predictions")
+            return result
 
         elif function_name == "search_private_journal":
-            return search_private_journal(user_id=user_id, **arguments)
+            result = search_private_journal(user_id=user_id, **arguments)
+            logger.info(f"[TOOL_RESULT] search_private_journal: Found {result.get('count', 0)} entries")
+            if result.get('count', 0) == 0:
+                logger.warning(f"[TOOL_RESULT] Journal search returned no results for query: '{arguments.get('query')}'")
+            return result
 
         elif function_name == "external_research":
-            # External research doesn't need user_id
-            return external_research(**arguments)
+            result = external_research(**arguments)
+            logger.info(f"[TOOL_RESULT] external_research: Retrieved research for '{arguments.get('query')}'")
+            return result
 
         else:
-            logger.error(f"Unknown function: {function_name}")
+            logger.error(f"[TOOL_EXECUTE] Unknown function: {function_name}")
             return {"error": f"Unknown function: {function_name}"}
 
     except Exception as e:
-        logger.exception(f"Error executing {function_name}")
+        logger.exception(f"[TOOL_EXECUTE] Error executing {function_name}: {type(e).__name__}: {str(e)}")
         error_msg = f"{type(e).__name__}: {str(e)}"
         return {"error": error_msg}
 
@@ -178,60 +198,112 @@ def generate_insights(user_id: str) -> list[dict]:
         - timestamp: When insight was generated
     """
     try:
-        logger.info(f"Generating insights for user {user_id}")
+        logger.info(f"[INSIGHTS] Generating insights for user {user_id}")
 
-        # Initialize Gemini model WITHOUT function calling (due to SDK compatibility issues)
-        # We'll generate text-based insights instead
+        # Initialize Gemini model WITH tools to access real health data
         model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash-exp",
-            system_instruction="""You are a proactive health insights AI assistant. Analyze the user's health data and generate 3-5 actionable, specific health insights.
+            model_name="gemini-2.5-flash",
+            tools=TOOL_SCHEMAS,
+            system_instruction="""You are a proactive health insights AI assistant. You have access to the user's health data through tools.
 
-Focus on:
-1. Unusual patterns or anomalies in their health metrics
-2. Correlations and relationships between different health factors
-3. Trends and patterns over time
-4. Personalized, evidence-based recommendations
+To generate insights:
+1. Use find_correlations to discover relationships between health metrics
+2. Use detect_anomalies on key metrics (heart_rate_resting, steps, sleep_duration) to find unusual patterns
+3. Based on the data from these tools, generate 3-5 specific, actionable insights
 
-Be specific with numbers and dates from their data. Provide insights that are meaningful, backed by data, and relevant to their overall health and wellness."""
+Be specific with actual numbers, dates, and metric values from the tool results. Provide insights that are meaningful, backed by real data, and relevant to their health."""
         )
 
-        # Create a prompt for insight generation
-        prompt = """Based on my health data, please analyze and provide 3-5 specific, actionable health insights. Include:
-1. Any unusual patterns or anomalies you notice in my metrics like heart rate, steps, sleep duration, blood pressure, and respiratory rate
-2. Any interesting correlations or relationships you see between different health factors
-3. Trends you observe and personalized recommendations based on those trends
+        # Create a prompt that encourages tool use
+        prompt = """Analyze my health data and provide 3-5 specific health insights. Use your tools to:
+1. Find correlations between my health metrics
+2. Detect any anomalies in my heart rate, steps, and sleep patterns
+3. Based on the real data you find, give me personalized recommendations
 
-Format your response as a clear, numbered list with specific metrics and data points."""
+Format your response as a clear, numbered list with specific metrics, dates, and values from my actual data."""
 
         # Start chat and send message
         chat = model.start_chat()
         response = chat.send_message(prompt)
 
-        # Extract the text response
+        # Handle function calls (same pattern as process_query)
+        max_iterations = 10
+        iteration = 0
+        tools_used = []
+        
+        while iteration < max_iterations and response.candidates[0].content.parts:
+            iteration += 1
+            parts = response.candidates[0].content.parts
+            
+            # Collect all function calls
+            function_calls_to_execute = []
+            has_function_calls = False
+            
+            for part in parts:
+                if hasattr(part, 'function_call') and part.function_call:
+                    has_function_calls = True
+                    function_calls_to_execute.append(part.function_call)
+            
+            # If no function calls, we got the final response
+            if not has_function_calls:
+                break
+            
+            # Execute all function calls
+            function_response_parts = []
+            
+            for function_call in function_calls_to_execute:
+                function_name = function_call.name
+                function_args = dict(function_call.args)
+                
+                logger.info(f"[INSIGHTS] Tool called: {function_name} with args: {function_args}")
+                tools_used.append(function_name)
+                
+                # Execute the function
+                function_result = _execute_function(function_name, user_id, function_args)
+                
+                # Create function response
+                function_response_parts.append(
+                    genai.protos.Part(
+                        function_response=genai.protos.FunctionResponse(
+                            name=function_name,
+                            response={"result": function_result}
+                        )
+                    )
+                )
+            
+            # Send function responses back to Gemini
+            logger.info(f"[INSIGHTS] Sending {len(function_response_parts)} tool results back to Gemini")
+            response = chat.send_message(
+                genai.protos.Content(parts=function_response_parts)
+            )
+
+        # Extract the final text response
         final_text = response.text if response.text else "Unable to generate insights at this time."
 
-        logger.info(f"Generated insights: {final_text[:200]}...")
+        logger.info(f"[INSIGHTS] Generated insights using tools: {tools_used}")
+        logger.info(f"[INSIGHTS] Response preview: {final_text[:200]}...")
 
         # Return structured insights
         return [{
             "type": "summary",
             "title": "AI Health Insights",
             "description": final_text,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "tools_used": tools_used
         }]
 
     except Exception as e:
-        logger.exception(f"Error generating insights for user {user_id}")
+        logger.exception(f"[INSIGHTS] Error generating insights for user {user_id}")
         error_msg = f"{type(e).__name__}: {str(e)}"
         return [{
             "type": "error",
             "title": "Error Generating Insights",
             "description": f"Unable to generate insights: {error_msg}",
-            "timestamp": "now"
+            "timestamp": datetime.utcnow().isoformat()
         }]
 
 
-def process_query(user_id: str, query: str) -> dict:
+def process_query(user_id: str, query: str, session_history: Optional[list] = None, access_token: Optional[str] = None) -> dict:
     """
     Process an interactive user query using Gemini with automatic function calling.
 
@@ -241,6 +313,8 @@ def process_query(user_id: str, query: str) -> dict:
     Args:
         user_id: User ID for data scoping
         query: Natural language question from the user
+        session_history: Optional session-based conversation history (preferred)
+        access_token: JWT token for accessing user's chat history (legacy, unused if session_history provided)
 
     Returns:
         Dictionary with:
@@ -252,9 +326,27 @@ def process_query(user_id: str, query: str) -> dict:
     try:
         logger.info(f"Processing query for user {user_id}: '{query}'")
 
+        # Use session-based history if provided (preferred approach)
+        history = []
+        if session_history:
+            # Convert session history to Gemini format
+            history = []
+            for msg in session_history:
+                role = "user" if msg.get("role") == "user" else "model"
+                content = msg.get("content", "")
+                if content:
+                    history.append({
+                        "role": role,
+                        "parts": [{"text": content}]
+                    })
+            logger.info(f"Using session-based history with {len(history)} messages")
+        else:
+            # Fallback to empty history (no database dependency)
+            logger.info("No session history provided, starting fresh conversation")
+
         # Initialize Gemini model with tools
         model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash-exp",
+            model_name="gemini-2.5-flash",
             tools=TOOL_SCHEMAS,
             system_instruction="""You are a personalized health AI assistant. You have access to the user's private health data and can:
 1. Detect anomalies in health metrics
@@ -263,56 +355,86 @@ def process_query(user_id: str, query: str) -> dict:
 4. Search their private journal entries
 5. Research health topics on the internet
 
+Available health metrics include:
+- Heart: heart_rate_resting, heart_rate_sleep, heart_rate_variability_sdnn, heart_rate_variability_rmssd
+- Activity: steps, active_duration, floors_climbed, active_energy_burned
+- Sleep: sleep_duration, sleep_deep_duration, sleep_rem_duration, sleep_light_duration
+- Body: weight, body_mass_index, body_fat, height
+- Vitals: blood_pressure_systolic, blood_pressure_diastolic, oxygen_saturation, respiratory_rate, blood_glucose
+
+You can use user-friendly names (e.g., "heart rate" for "heart_rate_resting") and they will be normalized automatically.
+
 When answering queries:
 - Always prioritize the user's privacy and data security
 - Provide specific, actionable insights based on their personal data
 - Cite sources when using external research
 - Be clear about the limitations of your analysis
 - Use a supportive, non-alarmist tone
-- If you detect concerning patterns, suggest consulting a healthcare professional"""
+- If you detect concerning patterns, suggest consulting a healthcare professional
+- Remember context from previous messages in this conversation"""
         )
 
         # Track tool usage
         tools_used = []
         tool_results = {}
 
-        # Start chat session
-        chat = model.start_chat()
+        # Start chat session with history
+        chat = model.start_chat(history=history)
 
         # Send the user's query
         response = chat.send_message(query)
 
         # Handle function calls manually to inject user_id
-        while response.candidates[0].content.parts:
-            part = response.candidates[0].content.parts[0]
-
-            # Check if this is a function call
-            if hasattr(part, 'function_call') and part.function_call:
-                function_call = part.function_call
+        # Support multiple function calls in a single response
+        max_iterations = 10  # Prevent infinite loops
+        iteration = 0
+        
+        while iteration < max_iterations and response.candidates[0].content.parts:
+            iteration += 1
+            parts = response.candidates[0].content.parts
+            
+            # Collect all function calls from all parts
+            function_calls_to_execute = []
+            has_function_calls = False
+            
+            for part in parts:
+                if hasattr(part, 'function_call') and part.function_call:
+                    has_function_calls = True
+                    function_calls_to_execute.append(part.function_call)
+            
+            # If no function calls, we got the final text response
+            if not has_function_calls:
+                break
+            
+            # Execute all function calls and collect responses
+            function_response_parts = []
+            
+            for function_call in function_calls_to_execute:
                 function_name = function_call.name
                 function_args = dict(function_call.args)
-
-                logger.info(f"Gemini called tool: {function_name}")
+                
+                logger.info(f"Gemini called tool: {function_name} with args: {function_args}")
                 tools_used.append(function_name)
-
+                
                 # Execute the function
                 function_result = _execute_function(function_name, user_id, function_args)
                 tool_results[function_name] = function_result
-
-                # Send result back to Gemini
-                response = chat.send_message(
-                    genai.protos.Content(
-                        parts=[genai.protos.Part(
-                            function_response=genai.protos.FunctionResponse(
-                                name=function_name,
-                                response={"result": function_result}
-                            )
-                        )]
+                
+                # Create function response part
+                function_response_parts.append(
+                    genai.protos.Part(
+                        function_response=genai.protos.FunctionResponse(
+                            name=function_name,
+                            response={"result": function_result}
+                        )
                     )
                 )
-            else:
-                # We got the final text response
-                break
+            
+            # Send all function responses back to Gemini in one message
+            logger.info(f"Sending {len(function_response_parts)} function responses back to Gemini")
+            response = chat.send_message(
+                genai.protos.Content(parts=function_response_parts)
+            )
 
         # Extract final answer
         final_answer = response.text
@@ -332,6 +454,10 @@ When answering queries:
         }
 
         logger.info(f"Query processed successfully. Tools used: {tools_used}")
+        
+        # Session-based memory: No database persistence needed
+        # History is managed by frontend and passed with each request
+        
         return result
 
     except Exception as e:
@@ -344,3 +470,4 @@ When answering queries:
             "sources": [],
             "error": error_msg
         }
+

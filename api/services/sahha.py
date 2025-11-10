@@ -182,14 +182,37 @@ class SahhaClient:
             if not categories:
                 categories = ["activity", "body", "characteristic", "sleep", "vitals"]
 
-            # Add each category as a separate param (Sahha API expects this format)
-            for category in categories:
-                params[f"categories"] = category
+            # Add categories as list (requests library handles repeated params correctly)
+            params["categories"] = categories
 
-            # Add each type as a separate param if specified
-            if types:
-                for biomarker_type in types:
-                    params[f"types"] = biomarker_type
+            # Add types as list if specified (all 40+ biomarker types)
+            if not types:
+                # Default to all common biomarker types
+                types = [
+                    # Activity
+                    "steps", "floors_climbed", "active_hours", "active_duration",
+                    "activity_low_intensity_duration", "activity_medium_intensity_duration",
+                    "activity_high_intensity_duration", "activity_sedentary_duration",
+                    "active_energy_burned", "total_energy_burned",
+                    # Body
+                    "height", "weight", "body_mass_index", "body_fat", "fat_mass", "lean_mass",
+                    "waist_circumference", "resting_energy_burned",
+                    # Characteristic
+                    "age", "biological_sex", "date_of_birth",
+                    # Sleep
+                    "sleep_start_time", "sleep_end_time", "sleep_duration", "sleep_debt",
+                    "sleep_interruptions", "sleep_in_bed_duration", "sleep_awake_duration",
+                    "sleep_light_duration", "sleep_rem_duration", "sleep_deep_duration",
+                    "sleep_regularity", "sleep_latency", "sleep_efficiency",
+                    # Vitals
+                    "heart_rate_resting", "heart_rate_sleep", "heart_rate_variability_sdnn",
+                    "heart_rate_variability_rmssd", "respiratory_rate", "respiratory_rate_sleep",
+                    "oxygen_saturation", "oxygen_saturation_sleep", "vo2_max", "blood_glucose",
+                    "blood_pressure_systolic", "blood_pressure_diastolic", "body_temperature_basal",
+                    "skin_temperature_sleep"
+                ]
+
+            params["types"] = types
 
             # Single request using account-level auth with external ID in URL
             response = requests.get(

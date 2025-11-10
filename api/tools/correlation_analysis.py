@@ -63,6 +63,12 @@ def find_correlations(
         # Pivot to get metrics as columns
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df['date'] = df['timestamp'].dt.date
+        
+        # Convert value to numeric (it's stored as TEXT in database)
+        df['value'] = pd.to_numeric(df['value'], errors='coerce')
+        
+        # Drop any rows where value conversion failed
+        df = df.dropna(subset=['value'])
 
         # Aggregate by date (take mean for multiple readings per day)
         pivot_df = df.pivot_table(

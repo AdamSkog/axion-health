@@ -7,6 +7,7 @@ import numpy as np
 from services.supabase_client import get_supabase_client
 from datetime import datetime, timedelta
 import logging
+from tools.forecasting import normalize_metric_name
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,9 @@ def detect_anomalies(
     try:
         logger.info(f"Detecting anomalies for user {user_id}, metric {metric_name}")
 
+        # Normalize metric name to match database schema
+        normalized_metric = normalize_metric_name(metric_name)
+        
         # Get Supabase client (admin for tool execution)
         supabase = get_supabase_client()
 
@@ -48,10 +52,10 @@ def detect_anomalies(
         end_date = datetime.utcnow()
         start_date = end_date - timedelta(days=lookback_days)
 
-        # Fetch health metrics
+        # Fetch health metrics using normalized metric name
         result = supabase.table("health_metrics").select(
             "timestamp, value, metric_type"
-        ).eq("user_id", user_id).eq("metric_type", metric_name).gte(
+        ).eq("user_id", user_id).eq("metric_type", normalized_metric).gte(
             "timestamp", start_date.isoformat()
         ).lte("timestamp", end_date.isoformat()).order("timestamp").execute()
 
@@ -64,8 +68,25 @@ def detect_anomalies(
 
         # Extract values and timestamps
         data_points = result.data
-        values = np.array([float(point['value']) for point in data_points]).reshape(-1, 1)
-        timestamps = [point['timestamp'] for point in data_points]
+        # Convert values to float (they're stored as TEXT in database)
+        values = []
+        timestamps = []
+        for point in data_points:
+            try:
+                values.append(float(point['value']))
+                timestamps.append(point['timestamp'])
+            except (ValueError, TypeError):
+                # Skip non-numeric values (e.g., blood pressure "120/80")
+                continue
+        
+        if len(values) < 5:
+            return {
+                "anomalies_found": False,
+                "error": f"Insufficient numeric data for {metric_name}. Need at least 5 data points.",
+                "data_points": len(values)
+            }
+        
+        values = np.array(values).reshape(-1, 1)
 
         # Apply IsolationForest
         iso_forest = IsolationForest(
@@ -95,7 +116,8 @@ def detect_anomalies(
             "mean_value": mean_value,
             "std_value": std_value,
             "total_data_points": len(values),
-            "metric_name": metric_name,
+            "metric_name": normalized_metric,
+            "original_query": metric_name,
             "date_range": {
                 "start": start_date.isoformat(),
                 "end": end_date.isoformat()

@@ -43,6 +43,7 @@ class HealthMetricResponse(BaseModel):
 class AgentQuery(BaseModel):
     """Model for AI agent query"""
     query: str = Field(..., min_length=1, description="User's question or query")
+    history: Optional[list[dict]] = Field(default=None, description="Optional conversation history for context")
 
 
 class AgentResponse(BaseModel):

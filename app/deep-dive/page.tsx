@@ -60,6 +60,8 @@ export default function DeepDivePage() {
   const [query, setQuery] = useState("");
   const [responses, setResponses] = useState<QueryResponse[]>([]);
   const [loading, setLoading] = useState(false);
+  // Session-based conversation history (resets on page refresh)
+  const [conversationHistory, setConversationHistory] = useState<Array<{role: string, content: string}>>([]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -70,8 +72,8 @@ export default function DeepDivePage() {
     setLoading(true);
 
     try {
-      // Call the real AI agent
-      const result = await queryAIAgent(currentQuery);
+      // Call the real AI agent with conversation history
+      const result = await queryAIAgent(currentQuery, conversationHistory);
 
       // Extract chart data if available
       const chartData = result.tool_results ? extractChartData(result.tool_results) : null;
@@ -87,6 +89,13 @@ export default function DeepDivePage() {
       };
 
       setResponses([newResponse, ...responses]);
+      
+      // Update conversation history for next query
+      setConversationHistory([
+        ...conversationHistory,
+        { role: "user", content: currentQuery },
+        { role: "assistant", content: result.answer }
+      ]);
     } catch (err) {
       console.error("Error querying agent:", err);
 

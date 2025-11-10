@@ -243,3 +243,6 @@ yarn-error.log*
 .env.example
 .mcp.json
 CLAUDE.md
+
+context/
+.cursor/

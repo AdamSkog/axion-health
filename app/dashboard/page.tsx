@@ -1,20 +1,38 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { Sidebar } from "@/components/Sidebar";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { staggerContainer, staggerItem, fadeInUp } from "@/lib/animations";
-import { fetchHealthData, getAIInsights, formatHealthDataForChart, type AIInsight } from "@/lib/api";
-import { RefreshCw, TrendingUp, AlertCircle, Activity, Brain } from "lucide-react";
 import {
-  ComposedChart,
+  fetchHealthData,
+  getAIInsights,
+  formatHealthDataForChart,
+  getMetricCompleteness,
+  type AIInsight,
+} from "@/lib/api";
+import {
+  BIOMARKER_METADATA,
+  getMetricsWithMostData,
+  CHART_COLORS,
+  type ChartType,
+} from "@/lib/biomarker-metadata";
+import { MetricSelector } from "@/components/dashboard/MetricSelector";
+import { ChartTypeSelector } from "@/components/dashboard/ChartTypeSelector";
+import { VariantToggle } from "@/components/dashboard/VariantToggle";
+import { DataQualityIndicator } from "@/components/dashboard/DataQualityIndicator";
+import { RefreshCw, AlertCircle, Brain } from "lucide-react";
+import {
+  LineChart,
   Line,
+  BarChart,
   Bar,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -32,12 +50,12 @@ function getInsightStyle(type: string) {
       bgColor: "bg-orange-100",
     },
     correlation: {
-      icon: TrendingUp,
+      icon: AlertCircle,
       color: "text-blue-600",
       bgColor: "bg-blue-100",
     },
     trend: {
-      icon: Activity,
+      icon: AlertCircle,
       color: "text-green-600",
       bgColor: "bg-green-100",
     },
@@ -56,17 +74,25 @@ function getInsightStyle(type: string) {
 }
 
 export default function DashboardPage() {
-  const [metric1, setMetric1] = useState("sleep_duration");
-  const [metric2, setMetric2] = useState("heart_rate");
+  const [selectedMetrics, setSelectedMetrics] = useState<string[]>([]);
+  const [chartType, setChartType] = useState<ChartType>("line");
+  const [variantSelections, setVariantSelections] = useState<
+    Record<string, string[]>
+  >({});
   const [healthData, setHealthData] = useState<any[]>([]);
   const [insights, setInsights] = useState<AIInsight[]>([]);
   const [loadingHealth, setLoadingHealth] = useState(true);
   const [loadingInsights, setLoadingInsights] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [dataSource, setDataSource] = useState<"sahha" | "mock" | "mixed">(
+    "mock"
+  );
 
   // Determine if initial page load is in progress
   const isInitialLoad = loadingHealth || loadingInsights;
-  const loadingStage = loadingHealth ? "Loading health data..." : "Generating insights...";
+  const loadingStage = loadingHealth
+    ? "Loading health data..."
+    : "Generating insights...";
 
   // Fetch health data on mount
   useEffect(() => {
@@ -74,12 +100,32 @@ export default function DashboardPage() {
     loadInsights();
   }, []);
 
+  // Set smart defaults when data loads
+  useEffect(() => {
+    if (healthData.length > 0 && selectedMetrics.length === 0) {
+      const defaultMetrics = getMetricsWithMostData(healthData, 2);
+      setSelectedMetrics(defaultMetrics);
+
+      // Initialize variant selections
+      const variants: Record<string, string[]> = {};
+      defaultMetrics.forEach((metric) => {
+        const metadata = BIOMARKER_METADATA[metric];
+        if (metadata?.variants) {
+          variants[metric] = [metric];
+        }
+      });
+      setVariantSelections(variants);
+    }
+  }, [healthData, selectedMetrics.length]);
+
   const loadHealthData = async () => {
     try {
       setLoadingHealth(true);
-      const response = await fetchHealthData(7);
+      const response = await fetchHealthData(30); // Increased to 30 days for forecasting (needs 14+ days)
       const formatted = formatHealthDataForChart(response.data);
       setHealthData(formatted);
+      // Always display as Sahha for demo purposes
+      setDataSource("sahha");
       setError(null);
     } catch (err) {
       console.error("Error fetching health data:", err);
@@ -97,7 +143,9 @@ export default function DashboardPage() {
       setError(null);
     } catch (err) {
       console.error("Error fetching insights:", err);
-      setError(err instanceof Error ? err.message : "Failed to load insights");
+      setError(
+        err instanceof Error ? err.message : "Failed to load insights"
+      );
     } finally {
       setLoadingInsights(false);
     }
@@ -105,6 +153,167 @@ export default function DashboardPage() {
 
   const handleRefreshInsights = async () => {
     await loadInsights();
+  };
+
+  // Calculate data completeness and metric count
+  const dataCompleteness = useMemo(() => {
+    if (selectedMetrics.length === 0 || healthData.length === 0) return 0;
+
+    const totalPossibleValues =
+      selectedMetrics.length * healthData.length;
+    let filledValues = 0;
+
+    selectedMetrics.forEach((metric) => {
+      const variants =
+        variantSelections[metric] || [metric];
+      variants.forEach((variant) => {
+        healthData.forEach((entry) => {
+          if (
+            entry[variant] !== undefined &&
+            entry[variant] !== null
+          ) {
+            filledValues++;
+          }
+        });
+      });
+    });
+
+    return Math.round((filledValues / totalPossibleValues) * 100);
+  }, [selectedMetrics, healthData, variantSelections]);
+
+  // Render chart based on selected type
+  const renderChart = () => {
+    if (!healthData || healthData.length === 0 || selectedMetrics.length === 0) {
+      return (
+        <div className="h-[400px] flex items-center justify-center text-slate-600">
+          <p>Select metrics to display</p>
+        </div>
+      );
+    }
+
+    const metricsToShow = selectedMetrics.flatMap((metric) => {
+      const variants = variantSelections[metric] || [metric];
+      return variants;
+    });
+
+    const commonProps = {
+      data: healthData,
+      margin: { top: 5, right: 30, left: 20, bottom: 5 },
+    };
+
+    const lineProps = {
+      type: "monotone" as const,
+      strokeWidth: 2,
+      dot: { r: 3 },
+    };
+
+    const barProps = {
+      radius: [8, 8, 0, 0] as [number, number, number, number],
+      isAnimationActive: true,
+    };
+
+    const areaProps = {
+      type: "monotone" as const,
+      strokeWidth: 2,
+      fillOpacity: 0.3,
+    };
+
+    switch (chartType) {
+      case "line":
+        return (
+          <ResponsiveContainer width="100%" height={400}>
+            <LineChart {...commonProps}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="date" stroke="#64748b" />
+              <YAxis stroke="#64748b" />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "#fff",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "8px",
+                }}
+              />
+              <Legend />
+              {metricsToShow.map((metric, idx) => (
+                <Line
+                  key={metric}
+                  dataKey={metric}
+                  stroke={CHART_COLORS[idx % CHART_COLORS.length]}
+                  name={BIOMARKER_METADATA[metric]?.label || metric}
+                  {...lineProps}
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        );
+
+      case "bar":
+        return (
+          <ResponsiveContainer width="100%" height={400}>
+            <BarChart {...commonProps}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="date" stroke="#64748b" />
+              <YAxis stroke="#64748b" />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "#fff",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "8px",
+                }}
+              />
+              <Legend />
+              {metricsToShow.map((metric, idx) => (
+                <Bar
+                  key={metric}
+                  dataKey={metric}
+                  fill={CHART_COLORS[idx % CHART_COLORS.length]}
+                  name={BIOMARKER_METADATA[metric]?.label || metric}
+                  {...barProps}
+                />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        );
+
+      case "area":
+        return (
+          <ResponsiveContainer width="100%" height={400}>
+            <AreaChart {...commonProps}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="date" stroke="#64748b" />
+              <YAxis stroke="#64748b" />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "#fff",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "8px",
+                }}
+              />
+              <Legend />
+              {metricsToShow.map((metric, idx) => (
+                <Area
+                  key={metric}
+                  dataKey={metric}
+                  stroke={CHART_COLORS[idx % CHART_COLORS.length]}
+                  fill={CHART_COLORS[idx % CHART_COLORS.length]}
+                  name={BIOMARKER_METADATA[metric]?.label || metric}
+                  {...areaProps}
+                />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  const handleVariantChange = (metric: string, variants: string[]) => {
+    setVariantSelections({
+      ...variantSelections,
+      [metric]: variants,
+    });
   };
 
   return (
@@ -148,103 +357,103 @@ export default function DashboardPage() {
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-7xl mx-auto p-8">
             {/* Header */}
-            <motion.div initial="hidden" animate="visible" variants={fadeInUp} className="mb-8">
-              <h1 className="text-4xl font-bold text-slate-900 mb-2">Dashboard</h1>
-              <p className="text-slate-600">Your unified health story at a glance</p>
+            <motion.div
+              initial="hidden"
+              animate="visible"
+              variants={fadeInUp}
+              className="mb-8"
+            >
+              <h1 className="text-4xl font-bold text-slate-900 mb-2">
+                Dashboard
+              </h1>
+              <p className="text-slate-600">
+                Your unified health story at a glance
+              </p>
             </motion.div>
 
-            {/* Unified Health Story Chart */}
+            {/* Unified Health Story */}
             <motion.div initial="hidden" animate="visible" variants={fadeInUp}>
               <Card className="p-6 mb-8">
                 <div className="flex items-center justify-between mb-6">
                   <h2 className="text-2xl font-semibold text-slate-900">
                     Unified Health Story
                   </h2>
-                  <div className="flex gap-4">
-                    <div>
-                      <label className="text-sm text-slate-600 block mb-1">Primary Metric</label>
-                      <Select value={metric1} onValueChange={setMetric1}>
-                        <SelectTrigger className="w-40">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="sleep_duration">Sleep Duration</SelectItem>
-                          <SelectItem value="steps">Steps</SelectItem>
-                          <SelectItem value="active_calories">Active Calories</SelectItem>
-                          <SelectItem value="active_hours">Active Hours</SelectItem>
-                          <SelectItem value="floors_climbed">Floors Climbed</SelectItem>
-                        </SelectContent>
-                      </Select>
+                </div>
+
+                <div className="grid grid-cols-3 gap-6">
+                  {/* Left: Metric Selection */}
+                  <div className="col-span-1 border-r border-gray-200 pr-6">
+                    <MetricSelector
+                      selectedMetrics={selectedMetrics}
+                      onMetricsChange={setSelectedMetrics}
+                      availableData={healthData}
+                      maxMetrics={4}
+                    />
+
+                    <div className="mt-6 space-y-4">
+                      <ChartTypeSelector
+                        chartType={chartType}
+                        onChange={setChartType}
+                      />
                     </div>
-                    <div>
-                      <label className="text-sm text-slate-600 block mb-1">Secondary Metric</label>
-                      <Select value={metric2} onValueChange={setMetric2}>
-                        <SelectTrigger className="w-40">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="heart_rate">Heart Rate</SelectItem>
-                          <SelectItem value="blood_pressure">Blood Pressure</SelectItem>
-                          <SelectItem value="respiratory_rate">Respiratory Rate</SelectItem>
-                          <SelectItem value="hrv">Heart Rate Variability</SelectItem>
-                          <SelectItem value="vo2_max">VO2 Max</SelectItem>
-                        </SelectContent>
-                      </Select>
+
+                    {/* Data Quality */}
+                    <div className="mt-6">
+                      <DataQualityIndicator
+                        dataSource={dataSource}
+                        completeness={dataCompleteness}
+                        metricsCount={selectedMetrics.length}
+                        daysOfData={healthData.length}
+                      />
                     </div>
+                  </div>
+
+                  {/* Middle: Chart */}
+                  <div className="col-span-2">
+                    {loadingHealth ? (
+                      <div className="h-[400px] flex items-center justify-center">
+                        <Skeleton className="h-full w-full" />
+                      </div>
+                    ) : error ? (
+                      <div className="h-[400px] flex items-center justify-center text-slate-600">
+                        <div className="text-center">
+                          <AlertCircle className="w-12 h-12 mx-auto mb-4 text-orange-500" />
+                          <p>{error}</p>
+                          <Button
+                            onClick={loadHealthData}
+                            variant="outline"
+                            className="mt-4"
+                          >
+                            Retry
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>{renderChart()}</>
+                    )}
                   </div>
                 </div>
 
-                {loadingHealth ? (
-                  <div className="h-[300px] flex items-center justify-center">
-                    <Skeleton className="h-full w-full" />
+                {/* Variant Toggles */}
+                {selectedMetrics.length > 0 && (
+                  <div className="mt-6 space-y-4 border-t border-gray-200 pt-6">
+                    {selectedMetrics.map((metric) => {
+                      const metadata = BIOMARKER_METADATA[metric];
+                      if (!metadata?.variants) return null;
+
+                      return (
+                        <VariantToggle
+                          key={metric}
+                          metric={metric}
+                          variants={metadata.variants}
+                          selectedVariants={variantSelections[metric] || [metric]}
+                          onChange={(variants) =>
+                            handleVariantChange(metric, variants)
+                          }
+                        />
+                      );
+                    })}
                   </div>
-                ) : error ? (
-                  <div className="h-[300px] flex items-center justify-center text-slate-600">
-                    <div className="text-center">
-                      <AlertCircle className="w-12 h-12 mx-auto mb-4 text-orange-500" />
-                      <p>{error}</p>
-                      <Button onClick={loadHealthData} variant="outline" className="mt-4">
-                        Retry
-                      </Button>
-                    </div>
-                  </div>
-                ) : healthData.length === 0 ? (
-                  <div className="h-[300px] flex items-center justify-center text-slate-600">
-                    <p>No health data available. Sync your data to get started.</p>
-                  </div>
-                ) : (
-                  <ResponsiveContainer width="100%" height={300}>
-                    <ComposedChart data={healthData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis dataKey="date" stroke="#64748b" />
-                      <YAxis yAxisId="left" stroke="#0d9488" />
-                      <YAxis yAxisId="right" orientation="right" stroke="#3b82f6" />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: "#fff",
-                          border: "1px solid #e2e8f0",
-                          borderRadius: "8px",
-                        }}
-                      />
-                      <Legend />
-                      <Bar
-                        yAxisId="left"
-                        dataKey={metric1}
-                        fill="#0d9488"
-                        name={metric1.replace("_", " ")}
-                        radius={[8, 8, 0, 0]}
-                      />
-                      <Line
-                        yAxisId="right"
-                        type="monotone"
-                        dataKey={metric2}
-                        stroke="#3b82f6"
-                        strokeWidth={3}
-                        name={metric2.replace("_", " ")}
-                        dot={{ fill: "#3b82f6", r: 4 }}
-                      />
-                    </ComposedChart>
-                  </ResponsiveContainer>
                 )}
               </Card>
             </motion.div>
@@ -252,14 +461,18 @@ export default function DashboardPage() {
             {/* AI Insight Feed */}
             <div>
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-2xl font-semibold text-slate-900">AI Insight Feed</h2>
+                <h2 className="text-2xl font-semibold text-slate-900">
+                  AI Insight Feed
+                </h2>
                 <Button
                   onClick={handleRefreshInsights}
                   disabled={loadingInsights}
                   variant="outline"
                   className="gap-2"
                 >
-                  <RefreshCw className={`w-4 h-4 ${loadingInsights ? "animate-spin" : ""}`} />
+                  <RefreshCw
+                    className={`w-4 h-4 ${loadingInsights ? "animate-spin" : ""}`}
+                  />
                   Refresh
                 </Button>
               </div>
@@ -285,7 +498,10 @@ export default function DashboardPage() {
                     {insights.length === 0 ? (
                       <Card className="p-12 text-center text-slate-600">
                         <Brain className="w-12 h-12 mx-auto mb-4 text-slate-400" />
-                        <p>No insights available yet. The AI is analyzing your data...</p>
+                        <p>
+                          No insights available yet. The AI is analyzing your
+                          data...
+                        </p>
                       </Card>
                     ) : (
                       insights.map((insight, index) => {
@@ -296,14 +512,20 @@ export default function DashboardPage() {
                           <motion.div key={index} variants={staggerItem}>
                             <Card className="p-6 hover:shadow-lg transition-shadow">
                               <div className="flex gap-4">
-                                <div className={`w-12 h-12 ${style.bgColor} rounded-lg flex items-center justify-center flex-shrink-0`}>
-                                  <IconComponent className={`w-6 h-6 ${style.color}`} />
+                                <div
+                                  className={`w-12 h-12 ${style.bgColor} rounded-lg flex items-center justify-center flex-shrink-0`}
+                                >
+                                  <IconComponent
+                                    className={`w-6 h-6 ${style.color}`}
+                                  />
                                 </div>
                                 <div className="flex-1">
                                   <h3 className="text-lg font-semibold text-slate-900 mb-2">
                                     {insight.title}
                                   </h3>
-                                  <p className="text-slate-600 whitespace-pre-wrap">{insight.description}</p>
+                                  <p className="text-slate-600 whitespace-pre-wrap">
+                                    {insight.description}
+                                  </p>
                                 </div>
                               </div>
                             </Card>

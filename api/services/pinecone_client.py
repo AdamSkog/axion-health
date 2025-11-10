@@ -68,15 +68,19 @@ def add_journal_entry(
         date: Entry date (ISO format)
     """
     try:
-        logger.info(f"Adding journal entry {entry_id} for user {user_id}")
+        logger.info(f"[PINECONE_ADD] Adding journal entry {entry_id} for user {user_id}, content length: {len(content)} chars")
 
         # Generate embedding
+        logger.debug(f"[PINECONE_ADD] Generating embedding for entry {entry_id}")
         embedding = get_embedding_for_document(content)
+        logger.info(f"[PINECONE_ADD] Generated embedding vector of length {len(embedding)} for entry {entry_id}")
 
         # Create unique ID combining user_id and entry_id for isolation
         vector_id = f"{user_id}#{entry_id}"
+        logger.debug(f"[PINECONE_ADD] Vector ID: {vector_id}")
 
         # Upsert to Pinecone with metadata
+        logger.debug(f"[PINECONE_ADD] Upserting to Pinecone index")
         index.upsert(
             vectors=[
                 {
@@ -92,10 +96,10 @@ def add_journal_entry(
             ]
         )
 
-        logger.info(f"Successfully added entry {entry_id} to Pinecone")
+        logger.info(f"[PINECONE_ADD] Successfully added entry {entry_id} to Pinecone with vector ID {vector_id}")
 
     except Exception as e:
-        logger.error(f"Error adding journal entry to Pinecone: {e}")
+        logger.error(f"[PINECONE_ADD] Error adding journal entry to Pinecone: {type(e).__name__}: {e}", exc_info=True)
         raise
 
 
@@ -117,33 +121,64 @@ def search_journal_entries(
         Dictionary with query, results count, and result list
     """
     try:
-        logger.info(f"Searching journal for user {user_id}: {query}")
+        logger.info(f"[PINECONE_SEARCH] Searching journal for user {user_id}: '{query}' (top_k={n_results})")
 
         # Generate query embedding
+        logger.debug(f"[PINECONE_SEARCH] Generating query embedding for: '{query}'")
         query_embedding = get_embedding_for_query(query)
+        logger.info(f"[PINECONE_SEARCH] Generated embedding vector of length {len(query_embedding)}")
 
         # Search with user_id filter
+        filter_params = {"user_id": {"$eq": user_id}}
+        logger.info(f"[PINECONE_SEARCH] Querying Pinecone with filter: {filter_params}, top_k={n_results}")
+        
         search_results = index.query(
             vector=query_embedding,
             top_k=n_results,
-            filter={"user_id": {"$eq": user_id}},
+            filter=filter_params,
             include_metadata=True,
         )
 
-        # Format results
+        # Log raw results from Pinecone
+        raw_matches = search_results.get("matches", [])
+        logger.info(f"[PINECONE_SEARCH] Pinecone returned {len(raw_matches)} matches")
+        
+        # Format results and log ALL matches (including low scores)
         results = []
-        for match in search_results.get("matches", []):
+        for i, match in enumerate(raw_matches, 1):
             metadata = match.get("metadata", {})
+            similarity_score = float(match.get("score", 0))
+            
             results.append(
                 {
                     "entry_id": metadata.get("entry_id"),
                     "date": metadata.get("date"),
                     "content": metadata.get("content"),
-                    "similarity": float(match.get("score", 0)),
+                    "similarity": similarity_score,
                 }
             )
+            
+            # Log EVERY match with full details
+            preview = metadata.get('content', '')[:100]
+            logger.info(f"[PINECONE_SEARCH] Match {i}: score={similarity_score:.4f}, date={metadata.get('date')}, entry_id={metadata.get('entry_id')}, preview='{preview}...'")
+            
+            # Add interpretation of score quality
+            if similarity_score > 0.7:
+                quality = "EXCELLENT"
+            elif similarity_score > 0.5:
+                quality = "GOOD"
+            elif similarity_score > 0.3:
+                quality = "FAIR"
+            else:
+                quality = "LOW"
+            logger.debug(f"[PINECONE_SEARCH] Match {i} quality: {quality} (typical good matches are > 0.3)")
 
-        logger.info(f"Found {len(results)} results for query")
+        if len(results) == 0:
+            logger.warning(f"[PINECONE_SEARCH] No journal entries found for user {user_id} matching query '{query}'. User may not have any journal entries yet, or they're not in Pinecone.")
+        else:
+            scores = [r['similarity'] for r in results]
+            logger.info(f"[PINECONE_SEARCH] Found {len(results)} journal entries with similarity scores: min={min(scores):.4f}, max={max(scores):.4f}, avg={sum(scores)/len(scores):.4f}")
+            logger.info(f"[PINECONE_SEARCH] All scores: {[f'{s:.4f}' for s in scores]}")
 
         return {
             "query": query,
