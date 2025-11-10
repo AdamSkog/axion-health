@@ -2,14 +2,21 @@
 Anomaly Detection Tool using IsolationForest
 Detects unusual patterns in health metrics
 """
-from sklearn.ensemble import IsolationForest
-import numpy as np
 from services.supabase_client import get_supabase_client
 from datetime import datetime, timedelta
 import logging
 from tools.forecasting import normalize_metric_name
 
 logger = logging.getLogger(__name__)
+
+# Try to import heavy dependencies (may not be available on Vercel free tier)
+try:
+    from sklearn.ensemble import IsolationForest
+    import numpy as np
+    DEPENDENCIES_AVAILABLE = True
+except ImportError:
+    DEPENDENCIES_AVAILABLE = False
+    logger.warning("Anomaly detection dependencies (scikit-learn, numpy) not available")
 
 
 def detect_anomalies(
@@ -39,6 +46,15 @@ def detect_anomalies(
         - mean_value: float
         - std_value: float
     """
+    # Check if dependencies are available
+    if not DEPENDENCIES_AVAILABLE:
+        return {
+            "error": "Anomaly detection temporarily unavailable",
+            "message": "Anomaly detection requires additional dependencies (scikit-learn, numpy) that are not available in this deployment to stay within size limits. This feature will be available when deployed to a platform with larger capacity.",
+            "metric": metric_name,
+            "suggestion": "Try searching your journal or asking about general patterns in your health data."
+        }
+    
     try:
         logger.info(f"Detecting anomalies for user {user_id}, metric {metric_name}")
 

@@ -2,13 +2,20 @@
 Correlation Analysis Tool
 Finds relationships between different health metrics
 """
-import pandas as pd
-import numpy as np
 from services.supabase_client import get_supabase_client
 from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Try to import heavy dependencies (may not be available on Vercel free tier)
+try:
+    import pandas as pd
+    import numpy as np
+    DEPENDENCIES_AVAILABLE = True
+except ImportError:
+    DEPENDENCIES_AVAILABLE = False
+    logger.warning("Correlation analysis dependencies (pandas, numpy) not available")
 
 
 def find_correlations(
@@ -33,6 +40,14 @@ def find_correlations(
         - correlation_matrix: full correlation matrix
         - metrics_analyzed: list of metrics included
     """
+    # Check if dependencies are available
+    if not DEPENDENCIES_AVAILABLE:
+        return {
+            "error": "Correlation analysis temporarily unavailable",
+            "message": "Correlation analysis requires additional dependencies (pandas, numpy) that are not available in this deployment to stay within size limits. This feature will be available when deployed to a platform with larger capacity.",
+            "suggestion": "Try searching your journal for patterns or insights about your health metrics."
+        }
+    
     try:
         logger.info(f"Finding correlations for user {user_id}")
 

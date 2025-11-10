@@ -2,14 +2,21 @@
 Time-Series Forecasting Tool using ARIMA
 Predicts future values of health metrics
 """
-from statsmodels.tsa.arima.model import ARIMA
-import pandas as pd
-import numpy as np
 from services.supabase_client import get_supabase_client
 from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Try to import heavy dependencies (may not be available on Vercel free tier)
+try:
+    from statsmodels.tsa.arima.model import ARIMA
+    import pandas as pd
+    import numpy as np
+    DEPENDENCIES_AVAILABLE = True
+except ImportError:
+    DEPENDENCIES_AVAILABLE = False
+    logger.warning("Forecasting dependencies (pandas, numpy, statsmodels) not available")
 
 
 def normalize_metric_name(metric_name: str) -> str:
@@ -117,6 +124,15 @@ def run_forecasting(
         - confidence_intervals: list of (low, high) tuples
         - model_accuracy: metrics about the model
     """
+    # Check if dependencies are available
+    if not DEPENDENCIES_AVAILABLE:
+        return {
+            "error": "Forecasting temporarily unavailable",
+            "message": "Time-series forecasting requires additional dependencies (pandas, numpy, statsmodels) that are not available in this deployment to stay within size limits. This feature will be available when deployed to a platform with larger capacity.",
+            "metric": metric_name,
+            "suggestion": "Try asking about correlations or searching your journal for insights about this metric."
+        }
+    
     try:
         logger.info(f"Forecasting {metric_name} for user {user_id}")
 
