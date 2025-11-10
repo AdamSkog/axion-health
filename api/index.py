@@ -1056,3 +1056,12 @@ if __name__ == "__main__":
         port=settings.API_PORT,
         reload=True
     )
+
+# Vercel serverless function handler
+# This allows FastAPI to run as a serverless function on Vercel
+try:
+    from mangum import Mangum
+    handler = Mangum(app)
+except ImportError:
+    # Mangum not installed (local development)
+    pass

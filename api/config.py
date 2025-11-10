@@ -25,7 +25,10 @@ class Settings(BaseSettings):
     # Optional settings
     API_PORT: int = 8000
     API_HOST: str = "0.0.0.0"
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "https://*.vercel.app",  # Allow all Vercel preview/production deployments
+    ]
 
     class Config:
         env_file = ".env"

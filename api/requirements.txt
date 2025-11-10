@@ -1,0 +1,31 @@
+# Python dependencies for Vercel deployment
+# Generated from pyproject.toml
+
+# Core Framework
+fastapi>=0.121.1
+uvicorn>=0.38.0
+mangum>=0.17.0
+
+# Supabase & Database
+supabase>=2.24.0
+
+# AI & ML
+google-genai>=1.49.0
+openai>=2.7.1
+pinecone>=7.3.0
+
+# Data Science
+numpy>=2.3.4
+pandas>=2.3.3
+scikit-learn>=1.7.2
+statsmodels>=0.14.5
+
+# Vector Store (using Pinecone instead)
+# chromadb>=1.3.4  # Commented out - using Pinecone
+
+# Configuration & Utilities
+pydantic>=2.12.4
+pydantic-settings>=2.11.0
+python-dotenv>=1.2.1
+requests>=2.32.5
+
