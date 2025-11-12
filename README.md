@@ -2,9 +2,14 @@
 
 VIDEO LINK: https://youtu.be/Adb5r04j8rg
 
-APP LINK: https://axion-health-2.vercel.app/
+APP LINK: https://axion-health.vercel.app/
 
-Note: Due to time constraints, there are a few issues with regard to pulling data from the Sanha API in Vercel due to unforeseen Vercel deployment compatibilities. The main features are covered in the YouTube video link above.
+USE THIS DEMO ACCOUNT TO PREVIEW FEATURES EASIER:
+Go to sign in page first, then input these credentials:
+```
+username = user@gmail.com
+password = password
+```
 
 **Health Telemetry, Reimagined with Agentic AI**
 
